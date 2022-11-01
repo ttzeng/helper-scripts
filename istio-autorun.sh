@@ -15,6 +15,7 @@ Usage: %s [OPTION]... [APP]...
         -k                  Keep installed resources
         -p uri              Virtual service URI to match
         -s                  Use HTTPS scheme on gateway
+        -w timeout          Wait for load balancer timeout (default %ds)
     Fortio options:
         -c connection       Number of connections (default %d)
         -F string           Parameters passed to Fortio
@@ -22,7 +23,7 @@ Usage: %s [OPTION]... [APP]...
         -u vus              Number of virtual users (default 0: skip k6)
         -K string           Parameters passed to Grafana k6
 
-Note: the Istio BookInfo sample app will be deployed if no APP is specified.\n' "$0" "$FORTIO_CONN"
+Note: the Istio BookInfo sample app will be deployed if no APP is specified.\n' "$0" "$LB_TIMEOUT" "$FORTIO_CONN"
 }
 
 KCTL='kubectl'
@@ -39,6 +40,7 @@ INGRESS_HOST=''
 INGRESS_PORT=''
 SECURE_INGRESS_PORT=''
 VIRTUALSERVICE_MATCH_URI=''
+LB_TIMEOUT=300
 
 # Fortio
 FORTIO_CONN=$(("$(nproc)" * 4))
@@ -59,7 +61,20 @@ function run_command {
 
 # void update_istio_ingress_url (void)
 function update_istio_ingress_url {
-    INGRESS_HOST="$($KCTL -n istio-system get svc istio-ingressgateway -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+    local delay timeout=false
+    until [ $timeout = true ]; do
+        INGRESS_HOST="$($KCTL -n istio-system get svc istio-ingressgateway -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+        [ -n "$INGRESS_HOST" ] && break
+        if [ $LB_TIMEOUT -gt 5 ]; then
+            delay=5
+        elif [ $LB_TIMEOUT -gt 0 ]; then
+            delay="$LB_TIMEOUT"
+        else
+            delay=0
+        fi
+        LB_TIMEOUT=$((LB_TIMEOUT-delay))
+        [ $delay -gt 0 ] && sleep "$delay" || timeout=true
+    done
     if [ -n "$INGRESS_HOST" ]; then
         # Support external load balancers
         INGRESS_PORT="$($KCTL -n istio-system get svc istio-ingressgateway -o jsonpath='{.spec.ports[?(@.name=="http2")].port}')"
@@ -176,7 +191,7 @@ function run_k6 {
 # void main (string[] arg)
 keep_installed_resources=false
 use_https_scheme=false
-while getopts 'f:kp:sc:F:u:K:' opt; do
+while getopts 'f:kp:sw:c:F:u:K:' opt; do
     case "$opt" in
     f)  CUSTOM_CONFIG="${OPTARG}"
         ;;
@@ -185,6 +200,8 @@ while getopts 'f:kp:sc:F:u:K:' opt; do
     p)  VIRTUALSERVICE_MATCH_URI="${OPTARG}"
         ;;
     s)  use_https_scheme=true
+        ;;
+    w)  LB_TIMEOUT="${OPTARG}"
         ;;
     c)  FORTIO_CONN="${OPTARG}"
         ;;
